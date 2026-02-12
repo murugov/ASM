@@ -1,6 +1,6 @@
 .model tiny
 .code
-.286
+.386
 org 100h
 
 CLS macro
@@ -29,6 +29,8 @@ TAKEPRMS macro
 	pop bx		; bx = y
 	pop ax		; ax = x
 	pop cx		; cx = length
+	pop dx		; dx = color
+	push dx
 	push cx;
 	push ax		; return to stack
 	push bx
@@ -49,6 +51,8 @@ continue:
     mov bx, 10          ; multiplier for parsing a number
     xor ax, ax
 
+	push 07h			; default gray/black color
+
 	mov bp, offset end_skip_spaces_x
 	jmp skip_spaces
 
@@ -60,7 +64,6 @@ end_skip_spaces_x:
 
 end_parse_x:
     push ax
-    
 
 	mov bp, offset end_skip_spaces_y
 	jmp skip_spaces
@@ -91,15 +94,23 @@ end_skip_spaces_msg:
 	VROFS		; calculate video-offset
 
 	CLS
+
+	mov al, [si]
+	cmp al, 2Dh
+	jne end_parce_color
+	jmp parse_color
+
+end_parce_color:
 	mov ax, 0B800h
 	mov es, ax
 
 	jmp print_msg
-
     EXIT
+
 
 return:
 	jmp bp
+
 
 skip_spaces:
     cmp byte ptr [si], ' '
@@ -109,6 +120,7 @@ skip_spaces:
     jnz skip_spaces
     EXIT
     
+
 parse_num:
     mov bl, byte ptr [si]
     cmp bl, '0'
@@ -128,14 +140,69 @@ parse_num:
     jz  return
     jmp parse_num
 
+parse_color:
+    inc si
+    dec cx
+    mov bl, byte ptr [si]
+    xor dx, dx
+    
+    ; red
+    cmp bl, 'r'
+    sete al
+    sub al, 2
+    and al, 4fh
+    mov dl, al
+	cmp bl, 'r'
+	je color_done
+    
+    ; green
+    cmp bl, 'g'
+    sete al
+    sub al, 2
+    and al, 2fh
+    mov dl, al
+	cmp bl, 'g'
+	je color_done
+    
+    ; blue
+    cmp bl, 'b'
+    sete al
+    sub al, 2
+    and al, 1fh
+    mov dl, al
+	cmp bl, 'b'
+	je color_done
+    
+color_done:
+    pop ax
+	pop bx
+	pop cx
+	pop es
+    push dx
+	sub cx, 03h
+	push cx
+	push bx
+	push ax
+
+	add si, 02h
+    
+    mov bp, offset end_skip_spaces_color
+    jmp skip_spaces
+
+end_skip_spaces_color:
+	jmp end_parce_color
+
+
 print_msg:
+	TAKEPRMS
 	lodsb
 	cmp al, 0Dh
 	je draw_frame
-	
-	mov ah, 4Fh		; fill red
+
+	mov ah, dl		; fill red
 	stosw
 	jmp print_msg	
+
 
 draw_frame:
 	TAKEPRMS							; take parametrs from stack
@@ -185,7 +252,7 @@ draw_up_side:
 	VROFS								; VROFS
 	sub di, 02h
 	mov al, 0C9h
-	mov ah, 4Fh
+	mov ah, dl
 	stosw
 
 	mov bp, offset tmp_lbl_1
@@ -193,7 +260,7 @@ draw_up_side:
 
 tmp_lbl_1:
 	mov al, 0BBh
-	mov ah, 4Fh
+	mov ah, dl
 	stosw
 	jmp end_draw_up_side
 
@@ -202,7 +269,7 @@ draw_down_side:
 	VROFS								; VROFS
 	sub di, 02h
 	mov al, 0C8h	
-	mov ah, 4Fh
+	mov ah, dl
 	stosw
 
 	mov bp, offset tmp_lbl_2
@@ -210,15 +277,14 @@ draw_down_side:
 
 tmp_lbl_2:
 	mov al, 0BCh	
-	mov ah, 4Fh
+	mov ah, dl
 	stosw
 	jmp end_draw_down_side
 
 
-
 draw_vside:
 	mov al, 0BAh						; set attribute
-	mov ah, 4Fh
+	mov ah, dl
 loop_lbl:
 	stosw
 	add di, 80h							; break to a new line
