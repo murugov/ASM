@@ -15,16 +15,20 @@ ARGS    ENDS
 cmd_args ARGS <0>
 
 FLAG_B  equ 0001h	; blink flag
+FLAG_PK equ 0002h	; poker frame flag
 SIMPLE_FLAGS dw 0
 
-PARAM_FLAG_X equ 0
-PARAM_FLAG_Y equ 1
-PARAM_FLAG_A equ 2
+PARAM_FLAG_X    equ 0
+PARAM_FLAG_Y    equ 1
+PARAM_FLAG_A    equ 2
+PARAM_FLAG_UF   equ 3
 
-param_values dw 0, 0, 07h
-param_present db 3 dup (0)
+
+param_values    dw 0, 0, 07h, 0
+param_present   db 4 dup (0)
 
 temp_num_value dw 0
+max_len_str dw 0
 
 
 CHECK_SIMPLE_FLAG MACRO flag_bit, label_if_set
@@ -32,10 +36,22 @@ CHECK_SIMPLE_FLAG MACRO flag_bit, label_if_set
     jne label_if_set
 ENDM
 
+CHECK_PARAM_FLAG MACRO param_index, label_if_set
+    test [param_present + param_index], 1
+    jne label_if_set
+ENDM
+
 GET_PARAM_VALUE MACRO param_index, dest_reg
     mov dest_reg, [param_values + param_index * 2]
     cmp [param_present + param_index], 1
 ENDM
+
+
+FRAMES      STRUC
+    def     db 0CDh, 0BAh, 0C9h, 0BBh, 0BCh, 0C8h
+    poker   db 07h, 03h, 04h, 05h, 06h
+    user    db ?
+FRAMES      ENDS
 
 
 main		proc
@@ -54,6 +70,10 @@ main		proc
 
 main        endp
 
+
+;=============================================================================
+; SKIPPING SPACES
+;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
@@ -98,6 +118,10 @@ skip_spaces proc
             ret
 skip_spaces endp
 
+
+;=============================================================================
+; TERMINAL COMMAND LINE ARGUMENTS PARSING
+;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
@@ -510,6 +534,10 @@ parse_num_auto  proc
 parse_num_auto  endp
 
 
+;=============================================================================
+; TERMINAL COMMAND LINE FLAGS PARSING
+;=============================================================================
+
 ;-----------------------------------------------------------------------------
 ; Info:
 ;   Parses command line arguments to extract flags and their parameters.
@@ -575,6 +603,8 @@ parse_flags proc
             cmp al, ' '
             je @@next
             
+            push di bx
+
             cmp al, 'x'
             je @@flag_with_param
             cmp al, 'y'
@@ -584,15 +614,30 @@ parse_flags proc
             
             cmp al, 'b'
             je @@set_b
-            jmp @@next_char
             
+            mov bx, di
+            
+            cmp word ptr [bx], 'kp'
+            je @@flag_pk
+
+            cmp word ptr [bx], 'fu'
+            je @@flag_with_param
+            
+            pop bx di
+            jmp @@next_char
+
         @@set_b:
             or [SIMPLE_FLAGS], FLAG_B
             jmp @@next_char
 
-@@aux_lbl:  jmp @@next_arg
+        @@flag_pk:
+            pop bx di
+            or [SIMPLE_FLAGS], FLAG_PK
+            inc di
+            jmp @@next_char
 
         @@flag_with_param:
+            pop bx di
             push ax bx cx dx si di
             
             mov di, [si + bx + 2]
@@ -629,9 +674,17 @@ parse_flags proc
             
         @@check_a:
             cmp al, 'a'
-            jne @@unknown
+            jne @@check_uf
             mov [param_values + PARAM_FLAG_A * 2], dx
             mov [param_present + PARAM_FLAG_A], 1
+            jmp @@skip_next_arg
+
+        @@check_uf:
+            mov bx, di
+            cmp word ptr [bx], 'fu'
+            jne @@unknown
+            mov [param_values + PARAM_FLAG_UF * 2], dx
+            mov [param_present + PARAM_FLAG_UF], 1
             
         @@skip_next_arg:
             add bx, 2
@@ -651,7 +704,8 @@ parse_flags proc
             
         @@next:
             add bx, 2
-            loop @@aux_lbl
+            dec cx
+            jne @@next_arg
             
         @@return:
             pop di si dx cx bx ax
@@ -659,6 +713,10 @@ parse_flags proc
 
 parse_flags endp
 
+
+;=============================================================================
+; SCREEN CLEANING
+;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
@@ -698,6 +756,43 @@ cls         proc
 cls		    endp
 
 
+;=============================================================================
+; SCREEN CLEANING
+;=============================================================================
+
+;-----------------------------------------------------------------------------
+; Info:
+; Entry:
+; Exit:
+; Expected:
+; Destroys:
+; Notes
+;-----------------------------------------------------------------------------
+
+strlen      proc
+
+            push cx bx
+            
+            xor ah, ah
+            mov bx, ax
+            
+            shl ax, 4
+            shl bx, 6
+            add ax, bx
+            
+            xor ch, ch
+            add ax, cx
+            shl ax, 1
+            
+            pop bx cx
+            ret
+strlen      endp
+
+
+;=============================================================================
+; SCREEN CLEANING
+;=============================================================================
+
 ;-----------------------------------------------------------------------------
 ; Info:
 ; Entry:
@@ -708,6 +803,7 @@ cls		    endp
 ;-----------------------------------------------------------------------------
 
 calc_video_offset proc
+
             push cx bx
             
             xor ah, ah
@@ -726,21 +822,65 @@ calc_video_offset proc
 calc_video_offset endp
 
 
+;=============================================================================
+; MESSAGE PRINTING
+;=============================================================================
+
 ;-----------------------------------------------------------------------------
 ; Info:
+;   Parses command line arguments to extract flags and their parameters.
+;   Supports simple flags (-b) and flags with parameters (-x, -y, -a, -uf).
+;   Flags with parameters expect the next argument as a numeric value.
+;
 ; Entry:
+;   Parameters are retrieved via GET_PARAM_VALUE macros:
+;   PARAM_FLAG_A - attribute (color) byte in DL
+;   PARAM_FLAG_X - X coordinate in CX
+;   PARAM_FLAG_Y - Y coordinate in AX
+;
 ; Exit:
+;   Message printed to screen at specified coordinates.
+;   Background of printed area is filled using the same attribute's
+;   background color (text remains unchanged, becomes black).
+;   Maximum line length is stored in [max_len_str] (in characters/2).
+;
 ; Expected:
+;   cmd_args.array    - contains pointers to message strings
+;   param_present     - byte array, 1 if parameter present, 0 otherwise
+;   param_values      - word array of parameter values
+;   max_len_str       - word variable to store maximum line length
+;   calc_video_offset - function that converts (X,Y) to video offset
+;   Video mode must be text mode (80x25)
+;
 ; Destroys:
-; Notes
+;   AX, BX, CX, DX, SI, DI, ES
+;   Flags
+;
+; Notes:
+;   - Messages are displayed at text video memory segment 0B800h
+;   - Backslash character (5Ch) forces line feed (moves to next line,
+;     same column)
+;   - Carriage return (0Dh) terminates the string
+;   - Attribute byte from PARAM_FLAG_A is used for all characters
+;   - Index into cmd_args.array is calculated from present flags:
+;     index = (param_present_X + param_present_Y + param_present_A +
+;     param_present_UF) * 4
+;   - Background filling preserves original characters, only attribute is
+;     modified
+;   - All lines are filled to the same width (max_len_str) for rectangular
+;     appearance
 ;-----------------------------------------------------------------------------
 
 print_msg   proc
             
+            ; solve number of flag-on
+
             GET_PARAM_VALUE PARAM_FLAG_A, dx
             GET_PARAM_VALUE PARAM_FLAG_X, cx
             GET_PARAM_VALUE PARAM_FLAG_Y, ax
             
+            inc cx
+            inc ax
             call calc_video_offset
             mov di, ax
             
@@ -751,23 +891,81 @@ print_msg   proc
             add bl, [param_present + PARAM_FLAG_X]
             add bl, [param_present + PARAM_FLAG_Y]
             add bl, [param_present + PARAM_FLAG_A]
+            add bl, [param_present + PARAM_FLAG_UF]
             shl bx, 2
             mov si, [cmd_args.array + bx]
 
             mov ah, dl
+            mov bx, di
+            push di
+            push [param_values + PARAM_FLAG_Y]
 
-        @@next_char:
+    @@next_char:
             lodsb
             cmp al, 0Dh
-            je @@return
-            
+            je @@end_print_msg
+
+            cmp al, 5Ch
+            jne @@put_char
+
+            sub bx, di
+            lea di, [di + bx + 160]
+            inc [param_values + PARAM_FLAG_Y]
+
+            neg bx
+            cmp bx, [max_len_str]
+            jbe @@not_new_max
+            mov [max_len_str], bx 
+
+        @@not_new_max:
+            mov bx, di
+            jmp @@next_char
+
+        @@put_char:  
             stosw
             jmp @@next_char
 
-        @@return:
+    @@end_print_msg:
+            sub bx, di
+            neg bx
+            cmp bx, [max_len_str]
+            jbe @@not_last_max
+            mov [max_len_str], bx
+
+    @@not_last_max:
+        shr [max_len_str], 1
+        jmp @@paint_background
+
+    @@paint_background:
+            pop cx di
+            sub cx, [param_values + PARAM_FLAG_Y]
+            neg cx
+            
+            mov dx, cx
+            mov cx, [max_len_str] 
+
+    @@cycle_by_y:
+            push cx di
+            
+    @@cycle_by_x:
+            mov al, es:[di]
+            stosw
+            loop @@cycle_by_x
+            
+            pop di
+            add di, 160
+            pop cx
+            dec dx
+            jnz @@cycle_by_y
+            
             ret
+
 print_msg endp
 
+
+;=============================================================================
+; SCREEN CLEANING
+;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
@@ -779,12 +977,33 @@ print_msg endp
 
 draw_frame	proc
 
-            ;mov bx, sp
-            ;lea si, [bp+4]
+            CHECK_SIMPLE_FLAG FLAG_PK @@draw_poker_frame
+            CHECK_PARAM_FLAG PARAM_FLAG_UF @@draw_user_frame
 
-            ;ret
-		    endp
+            jmp @@draw_default_frame
 
+
+    @@draw_poker_frame:
+            
+            ret
+
+
+    @@draw_user_frame:
+            GET_PARAM_VALUE PARAM_FLAG_UF dx
+            ret
+
+
+    @@draw_default_frame:
+            
+            ret
+
+
+draw_frame  endp
+
+
+;=============================================================================
+; EXIT
+;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
