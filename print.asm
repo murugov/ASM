@@ -22,13 +22,15 @@ PARAM_FLAG_X    equ 0
 PARAM_FLAG_Y    equ 1
 PARAM_FLAG_A    equ 2
 PARAM_FLAG_UF   equ 3
+PARAM_FLAG_MF   equ 4
 
 
 param_values    dw 0, 0, 07h, 0
 param_present   db 4 dup (0)
 
-temp_num_value dw 0
-max_len_str dw 0
+temp_num_value  dw 0
+max_len_str     dw 0
+number_lines    dw 0
 
 
 CHECK_SIMPLE_FLAG MACRO flag_bit, label_if_set
@@ -48,23 +50,70 @@ ENDM
 
 
 FRAMES      STRUC
-    def     db 0CDh, 0BAh, 0C9h, 0BBh, 0BCh, 0C8h
-    poker   db 07h, 03h, 04h, 05h, 06h
+    def     db 0C9h, 0CDh, 0BBh, 0BAh, 0BCh, 0CDh, 0C8h, 0BAh
+    poker   db 07h,  03h,  07h,  05h,  07h,  04h,  07h,  06h
+    multi   db 8 dup(0)
     user    db ?
 FRAMES      ENDS
 
+frame FRAMES <>
+
+
+SAVE_FRAME_CHARS macro frame
+    mov al, [frame]
+    mov ah, [frame + 1]
+    mov bl, [frame + 2]
+    mov bh, [frame + 3]
+    mov cl, [frame + 4]
+    mov ch, [frame + 5]
+    mov dl, [frame + 6]
+    mov dh, [frame + 7]
+    push dx cx bx ax
+endm
+
+RESTORE_FRAME_CHARS macro
+    pop ax bx cx dx
+    mov [frame.def], al
+    mov [frame.def + 1], ah
+    mov [frame.def + 2], bl
+    mov [frame.def + 3], bh
+    mov [frame.def + 4], cl
+    mov [frame.def + 5], ch
+    mov [frame.def + 6], dl
+    mov [frame.def + 7], dh
+endm
+
+SET_USER_FRAME_CHARS macro char
+    mov al, char
+    mov [frame.def], al
+    mov [frame.def + 1], al
+    mov [frame.def + 2], al
+    mov [frame.def + 3], al
+    mov [frame.def + 4], al
+    mov [frame.def + 5], al
+    mov [frame.def + 6], al
+    mov [frame.def + 7], al
+endm
+
+SET_MULTI_FRAME_CHARS macro
+    mov [frame.def], al
+    mov [frame.def + 1], ah
+    mov [frame.def + 2], bl
+    mov [frame.def + 3], bh
+    mov [frame.def + 4], cl
+    mov [frame.def + 5], ch
+    mov [frame.def + 6], dl
+    mov [frame.def + 7], dh
+endm
 
 main		proc
 
             call parse_cmd_args
-
-            xor bx, bx
-            mov bl, [cmd_args.count]
-
             call parse_flags
-
+        
             call cls
             call print_msg
+            call draw_frame
 
             call exit
 
@@ -622,19 +671,31 @@ parse_flags proc
 
             cmp word ptr [bx], 'fu'
             je @@flag_with_param
+
+            cmp word ptr [bx], 'fm'
+            je @@flag_mf
             
             pop bx di
             jmp @@next_char
 
         @@set_b:
+            pop bx di
             or [SIMPLE_FLAGS], FLAG_B
+            or [param_values + PARAM_FLAG_A * 2], 80h
             jmp @@next_char
 
         @@flag_pk:
             pop bx di
             or [SIMPLE_FLAGS], FLAG_PK
             inc di
+            inc di
             jmp @@next_char
+
+        @@flag_mf:
+            pop bx di
+            inc di
+            inc di
+            jmp @@parse_mf_params
 
         @@flag_with_param:
             pop bx di
@@ -691,6 +752,57 @@ parse_flags proc
             dec cx
             jmp @@next_char
             
+        @@parse_mf_params:
+            push cx si di
+            push bp
+            
+            cmp cx, 8
+            jb @@mf_error
+            
+            mov di, offset frame.multi
+            mov bp, cx
+            
+            mov cx, 8
+            
+        @@get_mf_param:
+            add bx, 2
+            mov dx, [si + bx]
+            test dx, dx
+            je @@mf_error
+            
+            push cx di si
+            mov di, dx
+
+            push di
+            mov cx, -1
+            xor al, al
+            mov al, ' '
+            repne scasb
+            not cx
+            dec cx
+            pop di            
+            
+            call parse_num_auto
+            pop si di cx
+            jc @@mf_error
+            
+            mov [di], al
+            inc di
+            loop @@get_mf_param
+            
+            mov cx, bp
+            sub cx, 8
+            
+            pop bp
+            pop di si cx
+            mov [param_present + PARAM_FLAG_MF], 1
+            jmp @@next_arg
+            
+        @@mf_error:
+            pop bp
+            pop di si cx
+            jmp @@parse_error
+
         @@no_value:
             pop di si dx cx bx ax
             
@@ -757,49 +869,35 @@ cls		    endp
 
 
 ;=============================================================================
-; SCREEN CLEANING
+; VIDEO MEMORY OFFSET CALCULATING
 ;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
+;   Calculates video memory offset for a given (X, Y) coordinate in text mode
+;
 ; Entry:
+;   AX = Y coordinate
+;   CX = X coordinate
+;
 ; Exit:
+;   AX = Offset in video memory segment (bytes from start of segment)
+;        Each character occupies 2 bytes (character + attribute)
+;
 ; Expected:
+;   Video mode must be 80x25 text mode (80 columns per row)
+;   Video segment is typically 0B800h (not modified by this function)
+;
 ; Destroys:
-; Notes
-;-----------------------------------------------------------------------------
-
-strlen      proc
-
-            push cx bx
-            
-            xor ah, ah
-            mov bx, ax
-            
-            shl ax, 4
-            shl bx, 6
-            add ax, bx
-            
-            xor ch, ch
-            add ax, cx
-            shl ax, 1
-            
-            pop bx cx
-            ret
-strlen      endp
-
-
-;=============================================================================
-; SCREEN CLEANING
-;=============================================================================
-
-;-----------------------------------------------------------------------------
-; Info:
-; Entry:
-; Exit:
-; Expected:
-; Destroys:
-; Notes
+;   AX - result (offset)
+;   BX - modified (used for calculation)
+;   Flags - modified
+;
+; Notes:
+;   - Formula: offset = (Y * 80 + X) * 2
+;   - Implementation uses bit shifts for efficiency:
+;     Y * 80 = Y * (64 + 16) = (Y << 6) + (Y << 4)
+;   For use with ES segment set to 0B800h
 ;-----------------------------------------------------------------------------
 
 calc_video_offset proc
@@ -873,14 +971,10 @@ calc_video_offset endp
 
 print_msg   proc
             
-            ; solve number of flag-on
-
             GET_PARAM_VALUE PARAM_FLAG_A, dx
             GET_PARAM_VALUE PARAM_FLAG_X, cx
             GET_PARAM_VALUE PARAM_FLAG_Y, ax
             
-            inc cx
-            inc ax
             call calc_video_offset
             mov di, ax
             
@@ -893,12 +987,28 @@ print_msg   proc
             add bl, [param_present + PARAM_FLAG_A]
             add bl, [param_present + PARAM_FLAG_UF]
             shl bx, 2
+
+            cmp [param_present + PARAM_FLAG_MF], 1
+            jne @@no_flag_mf
+            add bl, 18
+
+        @@no_flag_mf:
+            test [SIMPLE_FLAGS], FLAG_B
+            je @@no_flag_b
+            add bl, 2
+
+        @@no_flag_b:
+            test [SIMPLE_FLAGS], FLAG_PK
+            je @@no_flag_pk
+            add bl, 2
+
+        @@no_flag_pk:
             mov si, [cmd_args.array + bx]
 
             mov ah, dl
             mov bx, di
             push di
-            push [param_values + PARAM_FLAG_Y]
+            push [param_values + PARAM_FLAG_Y * 2]
 
     @@next_char:
             lodsb
@@ -910,7 +1020,7 @@ print_msg   proc
 
             sub bx, di
             lea di, [di + bx + 160]
-            inc [param_values + PARAM_FLAG_Y]
+            inc [param_values + PARAM_FLAG_Y * 2]
 
             neg bx
             cmp bx, [max_len_str]
@@ -934,29 +1044,31 @@ print_msg   proc
 
     @@not_last_max:
         shr [max_len_str], 1
-        jmp @@paint_background
 
     @@paint_background:
             pop cx di
-            sub cx, [param_values + PARAM_FLAG_Y]
+            sub cx, [param_values + PARAM_FLAG_Y * 2]
             neg cx
+            mov [number_lines], cx
             
             mov dx, cx
+            inc dx
             mov cx, [max_len_str] 
 
-    @@cycle_by_y:
+        @@cycle_by_y:
+            dec dx
             push cx di
             
-    @@cycle_by_x:
+        @@cycle_by_x:
             mov al, es:[di]
             stosw
             loop @@cycle_by_x
             
-            pop di
+            pop di cx
             add di, 160
-            pop cx
-            dec dx
-            jnz @@cycle_by_y
+
+            test dx, dx
+            jne @@cycle_by_y
             
             ret
 
@@ -964,54 +1076,363 @@ print_msg endp
 
 
 ;=============================================================================
-; SCREEN CLEANING
+; FRAME DRAWING
 ;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
+;   Draws a frame around the text block that was printed by print_msg.
+;   Supports different frame styles based on flags:
+;   - Default frame: uses predefined characters from frame.def
+;   - Poker frame: uses poker-specific characters from frame.poker
+;   - User frame: uses a single user-defined character for all frame elements
+;   - Multi frame: uses 8 custom characters from frame.multi
+;
 ; Entry:
+;   Global variables used:
+;     SIMPLE_FLAGS - FLAG_PK bit indicates poker frame
+;     param_present - array of presence flags for parameters
+;       PARAM_FLAG_UF - user frame flag present
+;       PARAM_FLAG_MF - multi frame flag present
+;     param_values - array of parameter values
+;       PARAM_FLAG_A - attribute (color) for frame
+;       PARAM_FLAG_X - X coordinate of text block
+;       PARAM_FLAG_Y - Y coordinate of text block
+;     number_lines - height of text block (calculated in print_msg)
+;     max_len_str - width of text block (in characters)
+;     frame - structure containing frame characters:
+;       frame.def[8] - default frame characters (top, right, bottom, left, corners)
+;       frame.poker[8] - poker frame characters
+;       frame.multi[8] - custom frame characters from -mf flag
+;       frame.user - user-defined character from -uf flag
+;
 ; Exit:
+;   Frame drawn in video memory at segment 0B800h
+;   No return value
+;
 ; Expected:
-; Destr:
+;   Video mode must be 80x25 text mode
+;   ES segment should be set to 0B800h
+;   calc_video_offset function must be available
+;   print_msg must have been called before to set number_lines and max_len_str
+;
+; Destroys:
+;   AX, BX, CX, DX, SI, DI
+;   Flags
+;
+; Notes:
+;   - Top line is drawn at Y-1, bottom line at Y+number_lines
+;   - Left line is drawn at X-1, right line at X+max_len_str
+;   - Frame characters are stored in FRAMES structure with specific offsets:
+;       [0] = top-left corner
+;       [1] = top horizontal line
+;       [2] = top-right corner
+;       [3] = right vertical line
+;       [4] = bottom-right corner
+;       [5] = bottom horizontal line
+;       [6] = bottom-left corner
+;       [7] = left vertical line
+;
+; Frame Types:
+;   Default: Uses standard ASCII line drawing characters
+;   Poker:   Uses card suit symbols (♥, ♦, ♣, ♠) and other poker symbols
+;   User:    Uses single user-defined character for all frame elements
+;   Multi:   Uses 8 custom characters provided via -mf flag
 ;-----------------------------------------------------------------------------
 
 draw_frame	proc
 
-            CHECK_SIMPLE_FLAG FLAG_PK @@draw_poker_frame
             CHECK_PARAM_FLAG PARAM_FLAG_UF @@draw_user_frame
+            CHECK_PARAM_FLAG PARAM_FLAG_MF @@draw_multi_frame
+            CHECK_SIMPLE_FLAG FLAG_PK @@draw_poker_frame
 
             jmp @@draw_default_frame
 
 
     @@draw_poker_frame:
+                        
+            SAVE_FRAME_CHARS frame.def
+            
+            SAVE_FRAME_CHARS frame.poker
+            pop ax bx cx dx
+
+            SET_MULTI_FRAME_CHARS
+
+            GET_PARAM_VALUE PARAM_FLAG_X, cx
+            GET_PARAM_VALUE PARAM_FLAG_Y, ax
+            sub ax, [number_lines]
+
+            push cx ax dx
+
+            mov dl, 24h
+            call @@draw_top_line
+
+            pop dx ax cx
+            push cx ax dx
+
+            mov dl, 24h
+            call @@draw_bottom_line
+
+            pop dx ax cx
+            push cx ax dx
+
+            mov dl, 20h
+            call @@draw_left_line
+
+            pop dx ax cx
+            push cx ax dx
+
+            mov dl, 20h
+            call @@draw_right_line
+
+            pop dx ax cx
+
+            mov dl, 0AEh
+            call @@draw_corners
+
+            RESTORE_FRAME_CHARS
             
             ret
 
 
     @@draw_user_frame:
-            GET_PARAM_VALUE PARAM_FLAG_UF dx
+            GET_PARAM_VALUE PARAM_FLAG_UF, dx
+            mov [frame.user], dl
+            
+            SAVE_FRAME_CHARS frame.def
+            
+            SET_USER_FRAME_CHARS [frame.user]
+            
+            call @@draw_default_frame
+            
+            RESTORE_FRAME_CHARS
+            
             ret
 
+    @@draw_multi_frame:
+            
+            SAVE_FRAME_CHARS frame.def
+            
+            SAVE_FRAME_CHARS frame.multi
+            pop ax bx cx dx
 
-    @@draw_default_frame:
+            SET_MULTI_FRAME_CHARS
+            
+            call @@draw_default_frame
+            
+            RESTORE_FRAME_CHARS
             
             ret
 
 
-draw_frame  endp
+    @@draw_default_frame:
+
+            GET_PARAM_VALUE PARAM_FLAG_A, dx
+            GET_PARAM_VALUE PARAM_FLAG_X, cx
+            GET_PARAM_VALUE PARAM_FLAG_Y, ax
+            sub ax, [number_lines]
+
+            push cx ax dx
+
+            call @@draw_top_line
+
+            pop dx ax cx
+            push cx ax dx
+
+            call @@draw_bottom_line
+
+            pop dx ax cx
+            push cx ax dx
+
+            call @@draw_left_line
+
+            pop dx ax cx
+            push cx ax dx
+
+            call @@draw_right_line
+
+            pop dx ax cx
+
+            call @@draw_corners
+
+            ret
+
+        ;-----------------------------------------------------------------------------
+        ; Draw top horizontal line
+        ; Entry:
+        ;   ax = top Y coordinate
+        ;   cx = X coordinate
+        ;   dl = attribute
+        ;-----------------------------------------------------------------------------
+        @@draw_top_line:
+            dec ax                           ; line above text
+            call calc_video_offset
+            mov di, ax
+            
+            mov al, [frame.def + 1]              ; horizontal line character
+            mov ah, dl
+            mov cx, [max_len_str]
+            call @@draw_hside
+            ret
+
+        ;-----------------------------------------------------------------------------
+        ; Draw right vertical line
+        ; Entry:
+        ;   ax = top Y coordinate
+        ;   cx = X coordinate
+        ;   dl = attribute
+        ;-----------------------------------------------------------------------------
+        @@draw_right_line:
+            add cx, [max_len_str]            ; column right of text
+            call calc_video_offset
+            mov di, ax
+            
+            mov cx, [number_lines]
+            inc cx                           ; include top and bottom lines
+            mov al, [frame.def + 3]          ; vertical line character
+            mov ah, dl
+            call @@draw_vside
+            ret
+
+        ;-----------------------------------------------------------------------------
+        ; Draw bottom horizontal line
+        ; Entry:
+        ;   ax = top Y coordinate
+        ;   cx = X coordinate
+        ;   dl = attribute
+        ;-----------------------------------------------------------------------------
+        @@draw_bottom_line:
+            inc ax
+            add ax, [number_lines]           ; line below text
+            call calc_video_offset
+            mov di, ax
+            
+            mov al, [frame.def + 5]              ; horizontal line character
+            mov ah, dl
+            mov cx, [max_len_str]
+            call @@draw_hside
+            ret
+
+        ;-----------------------------------------------------------------------------
+        ; Draw left vertical line
+        ; Entry:
+        ;   ax = top Y coordinate
+        ;   cx = X coordinate
+        ;   dl = attribute
+        ;-----------------------------------------------------------------------------
+        @@draw_left_line:
+            dec cx                           ; column left of text
+            call calc_video_offset
+            mov di, ax
+            
+            mov cx, [number_lines]
+            inc cx                           ; include top and bottom lines
+            mov al, [frame.def + 7]          ; vertical line character
+            mov ah, dl
+            call @@draw_vside
+            ret
+
+        ;-----------------------------------------------------------------------------
+        ; Draw all four corners
+        ; Entry:
+        ;   ax = top Y coordinate
+        ;   cx = X coordinate
+        ;   dl = attribute
+        ;-----------------------------------------------------------------------------
+        @@draw_corners:
+            push ax cx dx
+
+            ; Top-left corner
+            dec cx
+            dec ax
+            call calc_video_offset
+            mov di, ax
+            mov al, [frame.def]           ; top-left corner character
+            mov ah, dl
+            stosw
+
+            pop dx cx ax
+            push ax cx dx
+
+            ; Top-right corner
+            add cx, [max_len_str]
+            dec ax
+            call calc_video_offset
+            mov di, ax
+            mov al, [frame.def + 2]           ; top-right corner character
+            mov ah, dl
+            stosw
+
+            pop dx cx ax
+            push ax cx dx
+
+            ; Bottom-right corner
+            add cx, [max_len_str]
+            add ax, [number_lines]
+            inc ax
+            call calc_video_offset
+            mov di, ax
+            mov al, [frame.def + 4]           ; bottom-right corner character
+            mov ah, dl
+            stosw
+
+            pop dx cx ax
+            push ax cx dx
+
+            ; Bottom-left corner
+            dec cx
+            add ax, [number_lines]
+            inc ax
+            call calc_video_offset
+            mov di, ax
+            mov al, [frame.def + 6]           ; bottom-left corner character
+            mov ah, dl
+            stosw
+
+            pop dx cx ax
+            ret
+
+        ;-----------------------------------------------------------------------------
+        ; Draw horizontal line
+        ; Entry:
+        ;   di = starting video offset
+        ;   cx = length (in characters)
+        ;   ax = character (al) and attribute (ah)
+        ;-----------------------------------------------------------------------------
+        @@draw_hside:
+            rep stosw
+            ret
+
+        ;-----------------------------------------------------------------------------
+        ; Draw vertical line
+        ; Entry:
+        ;   di = starting video offset
+        ;   cx = length (in characters)
+        ;   ax = character (al) and attribute (ah)
+        ;-----------------------------------------------------------------------------
+        @@draw_vside:
+            stosw
+            sub di, 2
+            add di, 160
+            loop @@draw_vside
+            ret
+
+draw_frame endp
 
 
 ;=============================================================================
-; EXIT
+; PROGRAM TERMINATION
 ;=============================================================================
 
 ;-----------------------------------------------------------------------------
 ; Info:
-; Entry:
-; Exit:
-; Expected:
-; Destroys:
-; Notes
+;   Terminates the program and returns control to DOS.
+;
+; Entry:    None
+; Exit:     Program terminated, control returned to DOS
+; Destroys: None
+; Notes:    Uses DOS function 4Ch (terminate with return code)
+;           Return code 0 indicates successful execution
 ;-----------------------------------------------------------------------------
 
 exit		proc
@@ -1019,7 +1440,7 @@ exit		proc
 		    mov ax, 4c00h
 		    int 21h
 
-		    endp
+exit	    endp
 
 
 end start
